@@ -14,6 +14,7 @@ let STORES     = [];
 let ADMIN      = {};
 let MASTER_UOM = {};   // item-master UOM reference (master_uom.json), keyed by item code
 let MASTER_COST = {};  // indicative cost reference (master_cost.json), keyed by item code — display only, never persisted
+let REFERENCE_BAND = {}; // store cost reference band (store_reference_band.json), keyed by store no — display only, never persisted
 
 /* ════ LOAD DATA ════ */
 async function loadData() {
@@ -33,6 +34,11 @@ async function loadData() {
       const cres = await fetch('master_cost.json');
       MASTER_COST = cres.ok ? (await cres.json()) : {};
     } catch(ce) { MASTER_COST = {}; console.warn('master_cost.json load failed:', ce.message); }
+    /* โหลดช่วงอ้างอิงต้นทุนรายสาขา — ใช้แสดงผลเทียบเท่านั้น ไม่บันทึกกลับ Firebase */
+    try {
+      const rres = await fetch('store_reference_band.json');
+      REFERENCE_BAND = rres.ok ? (await rres.json()) : {};
+    } catch(re) { REFERENCE_BAND = {}; console.warn('store_reference_band.json load failed:', re.message); }
     /* จำกัดรายการนับเฉพาะรายการที่มี master record — ทุกรายการที่เหลือรับประกันว่ามี UOM/pack_size
        จาก master แล้ว หน่วยนับ/ขนาดบรรจุ จึงล็อกเสมอ (ทาง fallback แบบแก้ไขเองยังอยู่ในโค้ด
        แต่ในทางปฏิบัติ unreachable แล้ว เพราะไม่มีรายการไหนไม่มี master อีกต่อไป) */
@@ -182,10 +188,89 @@ function costAsOfDate(){
   const first = Object.values(MASTER_COST)[0];
   return first ? first.as_of : null;
 }
-function estCostCell(code, e){
+function estCostCellContent(code, e){
+  // not counted yet → show "—", same as any other empty cell in the row. estCostOf treats
+  // a missing qty as 0 (correct for summing into monthTotalCost/exports), but that 0 is not
+  // a real value to display here — showing "≈ 0.00" on an untouched row reads as fabricated data.
+  if(!isFilled(e)) return { cls:'est-cost-cell muted', html:'—' };
   const cost = estCostOf(code, e);
-  if(cost===null) return `<td class="est-cost-cell muted">—</td>`;
-  return `<td class="est-cost-cell">≈ ${fNum(cost,2)}</td>`;
+  if(cost===null) return { cls:'est-cost-cell muted', html:'—' };
+  return { cls:'est-cost-cell', html:`≈ ${fNum(cost,2)}` };
+}
+function estCostCell(code, e){
+  const {cls, html} = estCostCellContent(code, e);
+  return `<td class="${cls}" id="ec_${esc(code)}">${html}</td>`;
+}
+/* live single-row cost refresh (mirrors updateFlagCell's old pattern) — keeps input focus, no full re-render */
+function updateEstCostCell(code){
+  const el = document.getElementById(`ec_${code}`);
+  if(!el) return;
+  const {cls, html} = estCostCellContent(code, ENTRY_DATA[code]);
+  el.className = cls;
+  el.innerHTML = html;
+}
+/* current month's total estimated cost across every counted item — reuses estCostOf,
+   no second cost calculation. Display only: never persisted, never exported (yet). */
+function monthTotalCost(){
+  return ITEMS_DATA.reduce((sum, item) => {
+    const entry = ENTRY_DATA[item.code];
+    return sum + (entry ? (estCostOf(item.code, entry) || 0) : 0);
+  }, 0);
+}
+/* store cost reference band panel — total vs. historical min/avg/max, out-of-range flag.
+   Missing REFERENCE_BAND[storeNo] is the normal case today, not an edge case: never
+   fabricate a band, never fall back to another store, never compare against 0. */
+function refBandInnerHtml(){
+  const total = monthTotalCost();
+  const totalHtml = `
+    <div class="ref-band-total">
+      <div class="ref-band-total-lbl">มูลค่ารวมที่นับได้</div>
+      <div class="ref-band-total-val">฿${fNum(total,2)}</div>
+    </div>`;
+
+  const band = REFERENCE_BAND[String(SES.no)];
+  if(!band){
+    return `
+      <div class="ref-band-flex">
+        ${totalHtml}
+        <div class="ref-band-gauge-wrap">
+          <div class="ref-band-nodata">ยังไม่มีข้อมูลอ้างอิงสำหรับสาขานี้</div>
+        </div>
+      </div>`;
+  }
+
+  const {min, max, avg, months, period} = band;
+  const range = max - min;
+  const pctOf = v => range>0 ? Math.min(100, Math.max(0, ((v-min)/range)*100)) : 50;
+  const markerPct = pctOf(total);
+  const avgPct = pctOf(avg);
+
+  let status, cls;
+  if(total < min){ status='ต่ำกว่าค่าต่ำสุด'; cls='amber'; }
+  else if(total > max){ status='สูงกว่าค่าสูงสุด'; cls='red'; }
+  else { status='อยู่ในช่วงปกติ'; cls='green'; }
+
+  return `
+    <div class="ref-band-flex">
+      ${totalHtml}
+      <div class="ref-band-gauge-wrap">
+        <div class="ref-band-statuschip ${cls}">${status}</div>
+        <div class="ref-band-track">
+          <div class="ref-band-avgtick" style="left:${avgPct}%" title="ค่าเฉลี่ย ${fNum(avg,0)}"></div>
+          <div class="ref-band-marker ${cls}" style="left:${markerPct}%"></div>
+        </div>
+        <div class="ref-band-scale"><span>${fNum(min,0)}</span><span>${fNum(max,0)}</span></div>
+        <div class="ref-band-caption">อ้างอิง ${months} เดือน (${period})</div>
+      </div>
+    </div>`;
+}
+let _refBandDebounce=null;
+function updateReferenceBand(){
+  clearTimeout(_refBandDebounce);
+  _refBandDebounce = setTimeout(()=>{
+    const el = document.getElementById('refBandInner');
+    if(el) el.innerHTML = refBandInnerHtml();
+  }, 200);
 }
 /* lazily create a working entry, seeding UOM/pack defaults from MASTER_UOM (matches displayed defaults) */
 function ensureEntry(code){
@@ -881,6 +966,9 @@ function buildEntryView(C, editableMonths, mc, isActive){
 
   C.innerHTML=`
     ${lockWarning}
+    <div class="card ref-band-card" style="margin-bottom:14px">
+      <div id="refBandInner">${refBandInnerHtml()}</div>
+    </div>
     <div class="card">
       <div class="card-head">
         <div class="card-title">📝 บันทึกจำนวนสินค้า <span class="sub">GRP.68,78</span></div>
@@ -1005,7 +1093,7 @@ function buildEntryRows(items, isActive=true){
     }
 
     // ── editable (active month) ──
-    const qtyCell=`<td class="tr"><input class="qty-inp${filled?' filled':''}" type="number" min="0" step="0.01" id="q_${esc(code)}" value="${esc(String(qv))}" onchange="onQty('${esc(code)}',this.value)" onkeydown="navRow(event,${idx})"></td>`;
+    const qtyCell=`<td class="tr"><input class="qty-inp${filled?' filled':''}" type="number" min="0" step="1" id="q_${esc(code)}" value="${esc(String(qv))}" onchange="onQty('${esc(code)}',this.value)" onkeydown="navRow(event,${idx})"></td>`;
     return`<tr>${head}${qtyCell}${uomCell}${subunitCell}${packCell}${refCell(code)}${estCostCell(code,e)}</tr>`;
   }).join('');
 }
@@ -1054,10 +1142,17 @@ function onClsChange(v){CLS_FILTER=v;refreshEntryBody();}
 function onSearch(v){SEARCH_Q=v.trim();refreshEntryBody();}
 function onQty(code,val){
   const e=ensureEntry(code);
-  e.qty = val===''?'':(parseFloat(val)||0);
+  // จำนวน is whole packs only — เศษ already carries the fractional/partial-pack amount
+  e.qty = val===''?'':(Math.round(parseFloat(val))||0);
   markDirty();
-  const inp=document.getElementById(`q_${code}`);if(inp)inp.classList.toggle('filled',val!=='');
+  const inp=document.getElementById(`q_${code}`);
+  if(inp){
+    inp.classList.toggle('filled',val!=='');
+    if(val!=='') inp.value = e.qty; // snap the displayed value if a decimal was typed/pasted in
+  }
   updateSubtotal();
+  updateEstCostCell(code);
+  updateReferenceBand();
 }
 function onUom(code,val){ const e=ensureEntry(code); e.uom=val||null; markDirty(); updateSubtotal(); }
 function onPack(code,val){ const e=ensureEntry(code); e.pack_size = val===''?'':(parseFloat(val)||0); markDirty(); updateSubunitWarn(code); }
@@ -1066,6 +1161,8 @@ function onSubunit(code,val){
   e.subunit_qty = val===''?0:(parseFloat(val)||0);
   markDirty();
   updateSubtotal(); updateSubunitWarn(code);
+  updateEstCostCell(code);
+  updateReferenceBand();
 }
 function navRow(e,idx){
   const items=fItems();
@@ -1100,7 +1197,13 @@ function navSubunit(e,idx){
   }
 }
 function clearAllQty(){showModal(`<h3>🗑️ ล้างข้อมูลเดือน ${ymToFull(ENTRY_YM)}</h3><p style="color:var(--txt2);margin-top:8px">ต้องการล้างจำนวนที่บันทึกทั้งหมดใช่หรือไม่?</p><div class="modal-actions"><button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button><button class="btn btn-danger" onclick="confirmClear()">ล้างข้อมูล</button></div>`);}
-function confirmClear(){ITEMS_DATA.forEach(i=>{ENTRY_DATA[i.code]=null;});DIRTY=true;closeModal();refreshEntryBody();toast('ล้างข้อมูลแล้ว');}
+async function confirmClear(){
+  ITEMS_DATA.forEach(i=>{ENTRY_DATA[i.code]=null;});
+  markDirty();
+  closeModal();
+  refreshEntryBody();
+  await doSaveEntry(); // erase takes effect immediately — reuses the normal save path (month-active recheck, retry, offline guard), no separate save click required
+}
 
 async function doSaveEntry(){
   if(_saveInProgress){ toast('กำลังบันทึกอยู่ กรุณารอสักครู่...','err'); return; }
