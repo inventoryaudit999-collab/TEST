@@ -1999,16 +1999,16 @@ function exportStoreTemplate() {
   toast('กำลังสร้าง Excel Template...');
   const wb = XLSX.utils.book_new();
   const rows = [
-    ['No.', 'Class', 'รหัส', 'ชื่อสินค้า', 'จำนวน', 'หน่วยนับ', 'เศษ', 'ขนาดบรรจุ']
+    ['No.', 'Class', 'รหัส', 'ชื่อสินค้า', 'จำนวน', 'หน่วยนับ (จำนวน)', 'เศษ', 'หน่วยนับ (เศษ)', 'ขนาดบรรจุ']
   ];
   ITEMS_DATA.forEach(i => {
     const mps = masterPackSizeOf(i.code);
-    rows.push([i.no, i.class, i.code, i.name, '', masterUomOf(i.code)||'', '', mps!=null?mps:'']);
+    rows.push([i.no, i.class, i.code, i.name, '', masterUomOf(i.code)||'', '', masterSubUomOf(i.code)||'', mps!=null?mps:'']);
   });
   const ws = XLSX.utils.aoa_to_sheet(rows);
   // กำหนดความกว้างคอลัมน์
   ws['!cols'] = [
-    { wch: 6 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 12 }
+    { wch: 6 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 14 }, { wch: 12 }
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'รายการสินค้า');
   XLSX.writeFile(wb, `BakeryTemplate_ST${SES.no}_${currentYM()}.xlsx`);
